@@ -1,0 +1,7 @@
+# image-doctor — object tracking & feature matching demo
+# Python 3.8+  (tested on 3.10+)
+#
+# opencv-contrib-python includes SIFT (non-free, patent expired 2020).
+# If only ORB is needed, plain opencv-python works too.
+opencv-contrib-python==5.0.0.93
+numpy==2.5.4
