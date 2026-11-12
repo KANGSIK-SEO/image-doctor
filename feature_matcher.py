@@ -1,14 +1,13 @@
 """
-feature_matcher.py — ORB-based single-target feature matcher.
+feature_matcher.py — ORB 기반 단일 대상 특징점 매칭기.
 
-Loads one reference image; each call to match() checks whether the
-target object appears in the current frame.
+레퍼런스 이미지 1장을 로드하고, match() 호출마다 현재 프레임에
+해당 대상이 등장하는지 확인한다.
 
-Constraints:
-- Uses ORB (available in plain opencv-python; no contrib needed for ORB)
-- NO deep-learning; NO dnn module
-- SIFT is also supported (requires opencv-contrib-python) and can be
-  selected via algorithm='SIFT'.
+제약:
+- ORB 사용 (기본 opencv-python으로 가능; contrib 불필요)
+- SIFT도 지원 (opencv-contrib-python 필요, algorithm='SIFT' 선택)
+- 딥러닝 금지; dnn 모듈 금지
 """
 
 from __future__ import annotations
@@ -24,13 +23,13 @@ class FeatureMatcher:
     Parameters
     ----------
     reference_path : str | Path
-        Path to the reference image file.
+        레퍼런스 이미지 파일 경로.
     algorithm : str
-        'ORB' (default) or 'SIFT'.
+        'ORB' (기본값) 또는 'SIFT'.
     min_matches : int
-        Minimum good matches required to declare TARGET DETECTED.
+        "TARGET DETECTED" 판정에 필요한 최소 양호 매칭 수.
     ratio_thresh : float
-        Lowe's ratio-test threshold (SIFT only).
+        Lowe's ratio test 임계값 (SIFT 및 ORB 모두 적용).
     """
 
     def __init__(
@@ -45,55 +44,55 @@ class FeatureMatcher:
         self.ratio_thresh = ratio_thresh
         self._detected = False
 
-        # ----- build detector & matcher -----
+        # ----- 검출기 & 매칭기 생성 -----
         if self.algorithm == "SIFT":
             self._detector = cv2.SIFT_create()
-            # FLANN parameters for SIFT (float descriptors)
+            # SIFT(실수 디스크립터) → FLANN 기반 매칭
             index_params = {"algorithm": 1, "trees": 5}  # FLANN_INDEX_KDTREE
             search_params = {"checks": 50}
             self._matcher = cv2.FlannBasedMatcher(index_params, search_params)
         else:
+            # ORB (이진 디스크립터) → Brute-Force Hamming 거리
             self._detector = cv2.ORB_create(nfeatures=1000)
-            # Brute-force Hamming for ORB (binary descriptors)
             self._matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-        # ----- load reference image -----
+        # ----- 레퍼런스 이미지 로드 및 특징점 추출 -----
         ref_img = cv2.imread(str(reference_path), cv2.IMREAD_GRAYSCALE)
         if ref_img is None:
             raise FileNotFoundError(
-                f"Reference image not found: {reference_path}"
+                f"레퍼런스 이미지를 찾을 수 없습니다: {reference_path}"
             )
         self._ref_kp, self._ref_des = self._detector.detectAndCompute(
             ref_img, None
         )
         if self._ref_des is None or len(self._ref_des) == 0:
             raise ValueError(
-                "No features detected in reference image. "
-                "Try a more textured image."
+                "레퍼런스 이미지에서 특징점을 검출하지 못했습니다. "
+                "텍스처가 풍부한 이미지를 사용하세요."
             )
 
-        # Statistics (for the report)
+        # 보고서용 통계
         self.last_ref_kp_count: int = len(self._ref_kp)
-        self.last_matched: int = 0
-        self.last_good: int = 0
+        self.last_matched: int = 0   # 원시 매칭 수
+        self.last_good: int = 0      # ratio test 통과 수
 
     # ------------------------------------------------------------------
 
     @property
     def detected(self) -> bool:
-        """True if the last match() call found the target."""
+        """마지막 match() 호출에서 대상이 감지되었으면 True."""
         return self._detected
 
     def match(self, frame_gray: np.ndarray) -> Tuple[bool, int, int]:
         """
-        Match target against *frame_gray*.
+        frame_gray에 대해 대상 매칭을 수행한다.
 
         Returns
         -------
         (detected, n_matched, n_good)
-            detected   – whether target is considered found
-            n_matched  – raw descriptor matches
-            n_good     – matches that pass the quality filter
+            detected   – 대상 감지 여부
+            n_matched  – 원시 매칭 수
+            n_good     – ratio test 통과 매칭 수
         """
         frame_kp, frame_des = self._detector.detectAndCompute(frame_gray, None)
 
@@ -103,25 +102,15 @@ class FeatureMatcher:
             self.last_good = 0
             return False, 0, 0
 
-        # ----- match -----
-        if self.algorithm == "SIFT":
-            # knnMatch → Lowe ratio test
-            raw = self._matcher.knnMatch(self._ref_des, frame_des, k=2)
-            good = []
-            for pair in raw:
-                if len(pair) == 2:
-                    m, n = pair
-                    if m.distance < self.ratio_thresh * n.distance:
-                        good.append(m)
-        else:
-            # BFMatcher for ORB: kNN + ratio test on Hamming distances
-            raw = self._matcher.knnMatch(self._ref_des, frame_des, k=2)
-            good = []
-            for pair in raw:
-                if len(pair) == 2:
-                    m, n = pair
-                    if m.distance < self.ratio_thresh * n.distance:
-                        good.append(m)
+        # ----- kNN 매칭 + Lowe ratio test -----
+        raw = self._matcher.knnMatch(self._ref_des, frame_des, k=2)
+        good = []
+        for pair in raw:
+            if len(pair) == 2:
+                m, n = pair
+                # 가장 가까운 매칭이 두 번째보다 충분히 가까워야 양호한 매칭
+                if m.distance < self.ratio_thresh * n.distance:
+                    good.append(m)
 
         n_matched = len(raw)
         n_good = len(good)

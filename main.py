@@ -1,29 +1,29 @@
 """
-main.py — Real-time video analysis application.
+main.py — 실시간 영상 분석 애플리케이션 (메인 진입점).
 
-Usage
+사용법
 -----
   python main.py [--source SOURCE] [--target TARGET] [--lr LR]
 
-Arguments
+인수
 ---------
-  --source  : int (webcam index) or path to video file. Default: 0 (webcam).
-  --target  : path to reference image for feature matching. Default: none.
-  --lr      : background subtractor learning rate (0–1). Default: 0.005.
-  --algo    : feature matching algorithm, 'ORB' or 'SIFT'. Default: 'ORB'.
-  --save    : path to save session stats CSV on exit. Default: stats.csv.
+  --source  : 웹캠 인덱스(int) 또는 비디오 파일 경로. 기본값: 0 (웹캠).
+  --target  : 특징점 매칭용 레퍼런스 이미지 경로. 기본값: 없음.
+  --lr      : 배경 차분 학습률 (0–1). 기본값: 0.005.
+  --algo    : 특징점 알고리즘, 'ORB' 또는 'SIFT'. 기본값: 'ORB'.
+  --save    : 종료 시 세션 통계를 저장할 CSV 경로. 기본값: stats.csv.
 
-Keyboard controls
+키보드 조작
 -----------------
-  q   quit
-  s   save snapshot of current frame
-  p   pause / unpause
+  q   종료
+  s   현재 프레임 스냅샷 저장
+  p   일시정지 / 재개
 
-Constraints respected
+제약사항
 ---------------------
-- No YOLO / SSD / R-CNN / dnn module / MediaPipe
-- OpenCV + NumPy only
-- Tracker logic fully in tracker.py
+- YOLO / SSD / R-CNN / dnn 모듈 / MediaPipe 사용 금지
+- OpenCV + NumPy만 사용
+- 추적 로직은 tracker.py의 Tracker 클래스로 분리
 """
 
 from __future__ import annotations
@@ -42,70 +42,86 @@ from feature_matcher import FeatureMatcher
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI 인수 파싱
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Object detection & tracking demo")
+    p = argparse.ArgumentParser(description="객체 감지 및 추적 데모")
     p.add_argument("--source", default="0",
-                   help="Webcam index (int) or video file path")
+                   help="웹캠 인덱스(int) 또는 비디오 파일 경로")
     p.add_argument("--target", default=None,
-                   help="Reference image path for feature matching")
+                   help="특징점 매칭용 레퍼런스 이미지 경로")
     p.add_argument("--lr", type=float, default=0.005,
-                   help="Background subtractor learning rate (0–1)")
+                   help="배경 차분 학습률 (0–1)")
     p.add_argument("--algo", default="ORB", choices=["ORB", "SIFT"],
-                   help="Feature matching algorithm")
+                   help="특징점 매칭 알고리즘")
     p.add_argument("--save", default="stats.csv",
-                   help="Path to save session statistics CSV")
+                   help="세션 통계 저장 CSV 경로")
     return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# Background subtraction
+# 배경 차분 (Background Subtraction)
 # ---------------------------------------------------------------------------
 
 def build_background_subtractor(lr: float) -> cv2.BackgroundSubtractorMOG2:
     """
-    MOG2 is the standard adaptive GMM background model in OpenCV.
-    learning_rate fed here is the *default* rate; it can be overridden per
-    apply() call.  Three learning-rate experiments are logged in the report.
+    MOG2(Mixture of Gaussians v2) 배경 모델을 생성한다.
+
+    MOG2는 각 픽셀을 여러 개의 가우시안 분포 혼합으로 모델링하여
+    조명 변화에 적응한다. learning_rate가 클수록 빠르게 변화에 적응하지만
+    정지 객체를 배경으로 흡수하는 부작용이 있다.
     """
     bs = cv2.createBackgroundSubtractorMOG2(
-        history=500,
-        varThreshold=25,
-        detectShadows=True,   # shadows labelled 127, foreground 255
+        history=500,       # 배경 모델 학습에 사용할 이전 프레임 수
+        varThreshold=25,   # 전경/배경 판단 임계값 (높을수록 엄격)
+        detectShadows=True,  # 그림자 감지: 127(그림자), 255(전경)
     )
     return bs
 
 
 def process_fg_mask(fg_mask: np.ndarray) -> np.ndarray:
     """
-    Post-process raw foreground mask:
-      1. Threshold: keep only definite foreground (255), discard shadows (127).
-      2. Morphological open  → remove isolated noise pixels.
-      3. Morphological close → fill holes inside objects.
+    원시 전경 마스크를 후처리한다.
+
+    처리 순서:
+      1. 임계값 처리 — 완전한 전경(255)만 남기고 그림자(127) 제거
+      2. 모폴로지 열림(Opening) — 고립된 노이즈 픽셀 제거
+      3. 모폴로지 닫힘(Closing) — 객체 내부 구멍 채움
     """
+    # 그림자(127) 제거 — 255(전경)만 통과
     _, thresh = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+
+    # 타원형 커널: 사람 형태의 불규칙한 경계에 적합
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+    # 열림: 작은 노이즈 제거 (침식 후 팽창)
     opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+
+    # 닫힘: 내부 구멍 채움 (팽창 후 침식)
     closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+
     return closed
 
 
 # ---------------------------------------------------------------------------
-# Detection
+# 객체 감지
 # ---------------------------------------------------------------------------
 
-MIN_CONTOUR_AREA = 800   # px² — ignore tiny blobs (leaves, sensor noise)
+MIN_CONTOUR_AREA = 800   # px² — 이보다 작은 움직임은 노이즈로 무시
 
 
 def detect_objects(
     clean_mask: np.ndarray,
 ) -> list[tuple[int, int, int, int]]:
     """
-    Extract bounding boxes from the cleaned foreground mask.
+    정제된 전경 마스크에서 바운딩 박스를 추출한다.
 
-    Returns list of (x, y, w, h).
+    윤곽선(contour)을 찾고, 면적 필터링으로 너무 작은 블롭을 제거한다.
+
+    Returns
+    -------
+    (x, y, w, h) 형식의 바운딩 박스 목록
     """
     contours, _ = cv2.findContours(
         clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -114,27 +130,29 @@ def detect_objects(
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < MIN_CONTOUR_AREA:
-            continue
+            continue  # 너무 작은 블롭 무시
         x, y, w, h = cv2.boundingRect(cnt)
         boxes.append((x, y, w, h))
     return boxes
 
 
 # ---------------------------------------------------------------------------
-# Drawing helpers
+# 화면 오버레이 그리기
 # ---------------------------------------------------------------------------
 
+# ID별 색상 팔레트 (BGR 형식)
 COLORS = [
-    (0, 255, 0),    # green
-    (0, 165, 255),  # orange
-    (255, 0, 255),  # magenta
-    (255, 255, 0),  # cyan
-    (0, 0, 255),    # red
-    (255, 128, 0),  # blue-ish
+    (0, 255, 0),    # 초록
+    (0, 165, 255),  # 주황
+    (255, 0, 255),  # 자홍
+    (255, 255, 0),  # 청록
+    (0, 0, 255),    # 빨강
+    (255, 128, 0),  # 파랑 계열
 ]
 
 
 def color_for(oid: int) -> tuple[int, int, int]:
+    """ID 번호로 색상을 선택한다 (팔레트 순환)."""
     return COLORS[oid % len(COLORS)]
 
 
@@ -147,17 +165,17 @@ def draw_overlay(
     target_detected: bool,
     paused: bool,
 ) -> None:
-    """Draw all visual overlays onto *frame* in-place."""
+    """frame에 모든 시각화 요소를 그린다 (in-place)."""
 
-    # --- trails ---
+    # --- 궤적 선 그리기 ---
     for oid, centroid in objects.items():
         trail = tracker.get_trail(oid)
         c = color_for(oid)
         for i in range(1, len(trail)):
             cv2.line(frame, trail[i - 1], trail[i], c, 2)
 
-    # --- bounding boxes & IDs ---
-    # Map centroid → box for annotation (best-effort: nearest centroid wins)
+    # --- 바운딩 박스 & ID 표시 ---
+    # 중심점 → 가장 가까운 박스 매핑 (최선 근사)
     centroid_to_box: dict[tuple[int, int], tuple[int, int, int, int]] = {}
     for bx, by, bw, bh in boxes:
         cx, cy = bx + bw // 2, by + bh // 2
@@ -165,7 +183,7 @@ def draw_overlay(
 
     for oid, (cx, cy) in objects.items():
         c = color_for(oid)
-        # Find the closest box to this centroid
+        # 이 객체 중심점과 가장 가까운 박스 탐색
         best_box = None
         best_d = float("inf")
         for (bcx, bcy), box in centroid_to_box.items():
@@ -176,28 +194,30 @@ def draw_overlay(
         if best_box and best_d < 50 ** 2:
             bx, by, bw, bh = best_box
             cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), c, 2)
+        # ID 텍스트
         cv2.putText(
             frame, f"ID:{oid}",
             (cx - 20, cy - 10),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2,
         )
+        # 중심점 점
         cv2.circle(frame, (cx, cy), 4, c, -1)
 
-    # --- FPS ---
+    # --- FPS 표시 ---
     cv2.putText(
         frame, f"FPS: {fps:.1f}",
         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2,
     )
 
-    # --- stats ---
+    # --- ID 교환 / 추적 실패 카운터 ---
     stats = tracker.stats()
     cv2.putText(
         frame,
-        f"ID Switches: {stats['id_switches']}  Failures: {stats['tracking_failures']}",
+        f"ID Switch: {stats['id_switches']}  추적 실패: {stats['tracking_failures']}",
         (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 255), 2,
     )
 
-    # --- target detected banner ---
+    # --- TARGET DETECTED 배너 ---
     if target_detected:
         h, w = frame.shape[:2]
         overlay = frame.copy()
@@ -210,53 +230,54 @@ def draw_overlay(
             cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 255, 255), 2,
         )
 
-    # --- paused indicator ---
+    # --- 일시정지 표시 ---
     if paused:
         cv2.putText(
-            frame, "PAUSED",
+            frame, "일시정지",
             (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2,
         )
 
-    # --- controls reminder ---
+    # --- 조작 안내 ---
     cv2.putText(
-        frame, "q: quit  s: snapshot  p: pause",
+        frame, "q: 종료  s: 스냅샷  p: 일시정지",
         (10, frame.shape[0] - 10),
         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1,
     )
 
 
 # ---------------------------------------------------------------------------
-# Stats persistence
+# 통계 저장
 # ---------------------------------------------------------------------------
 
 def save_stats(path: str, tracker: "Tracker") -> None:
+    """추적 통계를 CSV 파일로 저장한다."""
     s = tracker.stats()
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["metric", "value"])
+        w.writerow(["항목", "값"])
         for k, v in s.items():
             w.writerow([k, v])
-    print(f"[info] Stats saved to {path}")
+    print(f"[정보] 통계 저장 완료: {path}")
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# 메인 루프
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     args = parse_args()
 
-    # --- open video source ---
+    # --- 영상 소스 열기 ---
     try:
-        source = int(args.source)
+        source = int(args.source)   # 정수면 웹캠 인덱스
     except ValueError:
-        source = args.source
+        source = args.source        # 문자열이면 파일 경로
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        print(f"[error] Cannot open source: {args.source}", file=sys.stderr)
+        print(f"[오류] 소스를 열 수 없습니다: {args.source}", file=sys.stderr)
         sys.exit(1)
 
-    # --- build subsystems ---
+    # --- 서브시스템 초기화 ---
     bs = build_background_subtractor(args.lr)
     tracker = Tracker(max_disappeared=30, max_distance=100, max_trail_len=60)
 
@@ -264,9 +285,9 @@ def main() -> None:
     if args.target:
         try:
             matcher = FeatureMatcher(args.target, algorithm=args.algo)
-            print(f"[info] Feature matcher loaded: {args.target} ({args.algo})")
+            print(f"[정보] 특징점 매칭기 로드 완료: {args.target} ({args.algo})")
         except (FileNotFoundError, ValueError) as e:
-            print(f"[warn] Feature matcher disabled: {e}", file=sys.stderr)
+            print(f"[경고] 특징점 매칭기 비활성화: {e}", file=sys.stderr)
 
     paused = False
     snapshot_idx = 0
@@ -275,62 +296,62 @@ def main() -> None:
     target_detected = False
     frame_count = 0
 
-    print("[info] Starting. Press q=quit, s=snapshot, p=pause")
+    print("[정보] 시작. q=종료, s=스냅샷, p=일시정지")
 
     while True:
         if not paused:
             ret, frame = cap.read()
             if not ret:
-                print("[info] End of stream.")
+                print("[정보] 영상 스트림 종료.")
                 break
             frame_count += 1
 
-            # --- FPS ---
+            # --- FPS 계산 ---
             t_now = time.perf_counter()
             fps = 1.0 / max(t_now - t_prev, 1e-6)
             t_prev = t_now
 
-            # --- background subtraction ---
+            # --- 배경 차분 ---
             fg_mask = bs.apply(frame, learningRate=args.lr)
             clean_mask = process_fg_mask(fg_mask)
 
-            # --- detection ---
+            # --- 객체 감지 ---
             boxes = detect_objects(clean_mask)
 
-            # --- tracking ---
+            # --- 객체 추적 ---
             objects = tracker.update(boxes)
 
-            # --- feature matching (every 3rd frame for performance) ---
+            # --- 특징점 매칭 (3프레임마다 1회 — 성능 최적화) ---
             if matcher is not None and frame_count % 3 == 0:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 target_detected, _, _ = matcher.match(gray)
 
-            # --- draw ---
+            # --- 화면 그리기 ---
             draw_overlay(
                 frame, boxes, objects, tracker, fps,
                 target_detected, paused,
             )
 
-        # --- show ---
-        cv2.imshow("image-doctor | object tracker", frame)
+        # --- 화면 출력 ---
+        cv2.imshow("image-doctor | 객체 추적기", frame)
 
-        # --- keyboard ---
+        # --- 키보드 처리 ---
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
         elif key == ord("s"):
             path = f"snapshot_{snapshot_idx:04d}.png"
             cv2.imwrite(path, frame)
-            print(f"[info] Snapshot saved: {path}")
+            print(f"[정보] 스냅샷 저장: {path}")
             snapshot_idx += 1
         elif key == ord("p"):
             paused = not paused
-            print("[info] Paused" if paused else "[info] Resumed")
+            print("[정보] 일시정지" if paused else "[정보] 재개")
 
     cap.release()
     cv2.destroyAllWindows()
     save_stats(args.save, tracker)
-    print(f"[info] Final stats: {tracker.stats()}")
+    print(f"[정보] 최종 통계: {tracker.stats()}")
 
 
 if __name__ == "__main__":

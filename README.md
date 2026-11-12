@@ -1,165 +1,160 @@
 # image-doctor 🩺
 
-**Real-time object detection, tracking, and feature matching — classical computer vision only.**
+**고전적 컴퓨터 비전 기반 실시간 객체 감지·추적·특징점 매칭 데모**
 
-> Assignment: AI/SW 심화 — 컴퓨터 비전  
-> Constraint: No YOLO / SSD / R-CNN / dnn / MediaPipe
+> 과제: AI/SW 심화 — 컴퓨터 비전  
+> 제약: YOLO / SSD / R-CNN / dnn / MediaPipe 사용 금지
 
 ---
 
-## Project Structure
+## 프로젝트 구조
 
 ```
 image-doctor/
-├── main.py              # Entry point: video I/O, BG subtraction, draw loop
-├── tracker.py           # Tracker class — greedy nearest-neighbour ID manager
-├── feature_matcher.py   # FeatureMatcher class — ORB/SIFT single-target match
-├── requirements.txt     # Pinned dependencies
-├── report.md            # Limit analysis report (Korean)
-└── README.md            # This file
+├── main.py              # 진입점: 영상 입출력, 배경 차분, 화면 출력 루프
+├── tracker.py           # Tracker 클래스 — 그리디 최근접 ID 관리
+├── feature_matcher.py   # FeatureMatcher 클래스 — ORB/SIFT 단일 대상 매칭
+├── requirements.txt     # 고정 의존성
+├── report.md            # 한계 분석 보고서
+└── README.md            # 이 파일
 ```
 
-### File responsibilities
+### 파일별 역할
 
-| File | Responsibility |
+| 파일 | 담당 |
 |---|---|
-| `main.py` | CLI args, `cv2.VideoCapture`, MOG2 background subtractor, morphology, detection, draw overlay, keyboard control, stats CSV |
-| `tracker.py` | `Tracker` class only — ID lifecycle, greedy matching, trail storage, ID-switch / failure counters |
-| `feature_matcher.py` | `FeatureMatcher` class only — ORB or SIFT descriptor extraction, Lowe ratio test, `detected` flag |
-| `report.md` | Quantitative performance tables, failure analysis, classical-vs-DL conclusion |
+| `main.py` | CLI 인수, `cv2.VideoCapture`, MOG2 배경 차분, 모폴로지, 감지, 화면 오버레이, 키보드 조작, 통계 CSV 저장 |
+| `tracker.py` | `Tracker` 클래스만 — ID 생명주기, 그리디 매칭, 궤적 저장, ID 교환·실패 카운터 |
+| `feature_matcher.py` | `FeatureMatcher` 클래스만 — ORB/SIFT 디스크립터 추출, Lowe ratio test, `detected` 플래그 |
+| `report.md` | 정량적 성능 표, 실패 조건 분석, 고전 CV vs 딥러닝 결론 |
 
 ---
 
-## Quick Start
+## 빠른 시작
 
 ```bash
-# 1. Create virtual environment
+# 1. 가상 환경 생성
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
-# 2. Install dependencies
+# 2. 의존성 설치
 pip install -r requirements.txt
 
-# 3a. Run with webcam (default)
+# 3a. 웹캠으로 실행 (기본값)
 python main.py
 
-# 3b. Run with a video file
+# 3b. 비디오 파일로 실행
 python main.py --source path/to/video.mp4
 
-# 3c. Run with feature matching target
+# 3c. 특징점 매칭 대상 지정
 python main.py --source path/to/video.mp4 --target path/to/target.jpg
 
-# 3d. Use SIFT instead of ORB
+# 3d. SIFT 알고리즘 사용
 python main.py --algo SIFT --target path/to/target.jpg
 ```
 
-### Keyboard Controls
+### 키보드 조작
 
-| Key | Action |
+| 키 | 동작 |
 |---|---|
-| `q` | Quit |
-| `s` | Save snapshot (`snapshot_NNNN.png`) |
-| `p` | Pause / unpause |
+| `q` | 종료 |
+| `s` | 스냅샷 저장 (`snapshot_NNNN.png`) |
+| `p` | 일시정지 / 재개 |
 
 ---
 
-## CLI Options
+## CLI 옵션
 
-| Option | Default | Description |
+| 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--source` | `0` | Webcam index or video file path |
-| `--target` | `None` | Reference image for feature matching |
-| `--lr` | `0.005` | MOG2 learning rate (0–1) |
-| `--algo` | `ORB` | Feature matching: `ORB` or `SIFT` |
-| `--save` | `stats.csv` | Output path for session statistics CSV |
+| `--source` | `0` | 웹캠 인덱스 또는 비디오 파일 경로 |
+| `--target` | 없음 | 특징점 매칭용 레퍼런스 이미지 경로 |
+| `--lr` | `0.005` | MOG2 학습률 (0–1) |
+| `--algo` | `ORB` | 특징점 알고리즘: `ORB` 또는 `SIFT` |
+| `--save` | `stats.csv` | 세션 통계 저장 CSV 경로 |
 
 ---
 
-## How It Works
+## 동작 원리
 
-### 1. Background Subtraction (MOG2)
-
-```
-Frame → MOG2.apply(lr) → fg_mask (0/127/255)
-         ↓
-  threshold(>200) → binary mask
-         ↓
-  MORPH_OPEN  → remove noise pixels
-         ↓
-  MORPH_CLOSE → fill holes inside objects
-```
-
-`learning_rate` controls how fast the background model adapts:
-- **0.001** — slow; misses lighting changes but stable
-- **0.005** — balanced default
-- **0.05** — fast; absorbs slow-moving objects into background
-
-### 2. Detection
-
-`findContours` on the cleaned mask → filter by area (`MIN_CONTOUR_AREA = 800 px²`) → list of `(x, y, w, h)` bounding boxes.
-
-### 3. Tracking (`tracker.py`)
+### 1. 배경 차분 — MOG2
 
 ```
-detections → compute centroids
-           → build distance matrix [N_objects × N_detections]
-           → greedy nearest-neighbour assignment (threshold: 100 px)
-           → update ID positions & trails
-           → retire IDs missing > max_disappeared frames
-           → register new detections as new IDs
+프레임 → MOG2.apply(lr) → fg_mask (0/127/255)
+           ↓
+  threshold(>200) → 이진 마스크 (그림자 제거)
+           ↓
+  MORPH_OPEN  → 노이즈 픽셀 제거
+           ↓
+  MORPH_CLOSE → 객체 내부 구멍 채움
 ```
 
-**Known limitation**: greedy matching fails when two objects cross paths — the tracker has no appearance information to disambiguate.
+`learning_rate`에 따른 차이:
 
-### 4. Feature Matching (`feature_matcher.py`)
+| learning_rate | 느린 변화 대응 | 빠른 변화 대응 | 조명 변화 오인 |
+|---|---|---|---|
+| 0.001 (매우 느림) | 그림자 잔상 발생 | 모든 변화를 전경으로 인식 | 낮음 |
+| 0.005 (기본값) | 균형 잡힌 적응 | 대부분 정상 처리 | 중간 |
+| 0.05 (빠름) | 빠르게 적응 | 정지 객체도 배경으로 흡수 | 높음 |
+
+### 2. 객체 감지
+
+`findContours` → 면적 필터(`MIN_CONTOUR_AREA = 800 px²`) → `(x, y, w, h)` 목록 반환.
+
+### 3. 추적 (`tracker.py`)
 
 ```
-Reference image → ORB/SIFT keypoints + descriptors (once at init)
-Each frame      → ORB/SIFT keypoints + descriptors
-               → knnMatch(k=2) → Lowe ratio test (θ=0.75)
-               → n_good >= min_matches → TARGET DETECTED
+감지 결과 → 중심점 계산
+          → 거리 행렬 [기존 객체 × 신규 감지] 구성
+          → 그리디 최근접 이웃 할당 (임계값: 100 px)
+          → ID 위치 & 궤적 갱신
+          → max_disappeared 초과 시 ID 삭제
+          → 미매칭 감지 결과 → 신규 ID 부여
+```
+
+**알려진 한계**: 두 객체가 교차할 때 외형 정보 없이 위치만으로 판단하므로 ID가 교환될 수 있음.
+
+### 4. 특징점 매칭 (`feature_matcher.py`)
+
+```
+레퍼런스 이미지 → ORB/SIFT 키포인트 + 디스크립터 추출 (초기화 시 1회)
+매 프레임      → ORB/SIFT 키포인트 + 디스크립터 추출
+              → knnMatch(k=2) → Lowe ratio test (θ=0.75)
+              → n_good >= min_matches → TARGET DETECTED
 ```
 
 ---
 
-## Constraints Respected
+## 제약사항 준수 확인
 
-- ✅ No YOLO / SSD / R-CNN
-- ✅ No `cv2.dnn` module
-- ✅ No MediaPipe
-- ✅ `Tracker` class in separate `tracker.py`
-- ✅ Quantitative performance measured and reported in `report.md`
-- ✅ ID Switch and per-condition failure rates included
+- ✅ YOLO / SSD / R-CNN 사용 금지
+- ✅ `cv2.dnn` 모듈 사용 금지
+- ✅ MediaPipe 사용 금지
+- ✅ `Tracker` 클래스를 별도 `tracker.py`로 분리
+- ✅ 정량적 성능 측정 결과 `report.md`에 포함
+- ✅ ID 교환 횟수 및 조건별 실패율 측정
 
 ---
 
-## Requirements
+## 실행 환경
 
-- Python 3.8+  (recommended: 3.10+)
-- `opencv-contrib-python >= 4.5` (includes SIFT)
+- Python 3.8 이상 (3.10+ 권장)
+- `opencv-contrib-python >= 4.5` (SIFT 포함)
 - `numpy`
 
-SIFT is patent-free since 2020 and ships in `opencv-contrib-python`.  
-ORB requires only plain `opencv-python`.
+> SIFT는 2020년 특허 만료 후 `opencv-contrib-python`에 포함됨.  
+> ORB만 사용할 경우 기본 `opencv-python`으로 충분.
 
 ---
 
-## Bonus Features (implemented)
+## 보고서
 
-| Feature | Location | Notes |
-|---|---|---|
-| IoU-based matching | `tracker.py` → switchable via `use_iou` param | Compare vs greedy centroid distance |
-| Learning-rate sweep | `main.py --lr` | Try 0.001 / 0.005 / 0.05 to observe tradeoff |
-| Session stats CSV | `main.py --save` | Auto-saved on quit |
+한계 분석 보고서는 [`report.md`](report.md)를 참고.
 
----
-
-## Report
-
-See [`report.md`](report.md) for:
-1. Tracking performance tables (ID Switch, failure rates by condition)
-2. Feature matching performance by rotation / occlusion
-3. Background modelling learning-rate tradeoff
-4. Why distance-only tracking cannot survive crossing paths
-5. Why hand-crafted features fail under unseen transforms
-6. Why deep learning is necessary (answered from hands-on experience)
+포함 내용:
+1. 추적 성능 측정 (ID 교환·실패율 표)
+2. 특징점 매칭 성능 (회전·가림 조건별)
+3. 배경 모델링 학습률 트레이드오프
+4. 거리 기반 추적의 본질적 한계
+5. Hand-crafted feature의 한계
+6. 딥러닝이 필요한 이유 (실습 경험 기반)

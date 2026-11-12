@@ -1,15 +1,15 @@
 """
-tracker.py — Distance-based multi-object tracker with trajectory history.
+tracker.py — 거리 기반 다중 객체 추적기 (궤적 기록 포함).
 
-Design constraints (per assignment):
-- NO deep-learning models (YOLO, SSD, etc.)
-- NO OpenCV dnn module
-- Pure OpenCV + NumPy only
+설계 제약 (과제 기준):
+- 딥러닝 모델(YOLO, SSD 등) 사용 금지
+- OpenCV dnn 모듈 사용 금지
+- OpenCV + NumPy만 사용
 
-ID lifecycle
-  NEW  → assigned on first detection
-  LIVE → matched each frame, stored in self.objects
-  DEAD → removed after max_disappeared frames with no match
+ID 생명주기
+  NEW  → 최초 감지 시 새 ID 부여
+  LIVE → 매 프레임 매칭 성공, self.objects에 저장
+  DEAD → max_disappeared 프레임 연속 미감지 시 삭제
 """
 
 from __future__ import annotations
@@ -21,16 +21,16 @@ from typing import Dict, List, Tuple
 
 class Tracker:
     """
-    Greedy nearest-neighbour tracker.
+    그리디 최근접 이웃(Greedy Nearest-Neighbour) 추적기.
 
     Parameters
     ----------
     max_disappeared : int
-        Frames without a match before an ID is retired.
+        매칭 실패 허용 최대 프레임 수. 초과 시 ID 삭제.
     max_distance : int
-        Pixel distance beyond which two detections cannot match.
+        두 감지 결과가 같은 객체로 매칭될 수 있는 최대 픽셀 거리.
     max_trail_len : int
-        Maximum number of trail points kept per object.
+        객체당 저장할 최대 궤적 점 수.
     """
 
     def __init__(
@@ -40,28 +40,28 @@ class Tracker:
         max_trail_len: int = 50,
     ) -> None:
         self.next_id: int = 0
-        # {id: centroid (x, y)}
+        # {id: 중심점 (x, y)}
         self.objects: OrderedDict[int, Tuple[int, int]] = OrderedDict()
-        # {id: frames since last seen}
+        # {id: 마지막으로 감지된 이후 경과 프레임 수}
         self.disappeared: OrderedDict[int, int] = OrderedDict()
-        # {id: list of (x, y) centroids — the trail}
+        # {id: (x, y) 중심점 목록 — 궤적}
         self.trails: Dict[int, List[Tuple[int, int]]] = {}
 
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
         self.max_trail_len = max_trail_len
 
-        # Statistics counters (read by main.py for the report)
-        self.id_switches: int = 0
-        self.tracking_failures: int = 0
-        self._prev_matches: Dict[int, int] = {}  # det_index → obj_id
+        # 성능 통계 카운터 (보고서용, main.py에서 읽음)
+        self.id_switches: int = 0       # ID 교환 발생 횟수
+        self.tracking_failures: int = 0 # 추적 실패(ID 삭제) 횟수
+        self._prev_matches: Dict[int, int] = {}  # 감지 인덱스 → 객체 ID
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # 내부 헬퍼
     # ------------------------------------------------------------------
 
     def _register(self, centroid: Tuple[int, int]) -> int:
-        """Register a new object; return its fresh ID."""
+        """새 객체를 등록하고 새 ID를 반환한다."""
         oid = self.next_id
         self.objects[oid] = centroid
         self.disappeared[oid] = 0
@@ -70,37 +70,37 @@ class Tracker:
         return oid
 
     def _deregister(self, oid: int) -> None:
-        """Remove an object that has been missing too long."""
+        """오랫동안 사라진 객체를 추적 목록에서 제거한다."""
         del self.objects[oid]
         del self.disappeared[oid]
-        # Keep trail in memory so callers can still read it; clear if desired.
         self.trails.pop(oid, None)
 
     def _append_trail(self, oid: int, centroid: Tuple[int, int]) -> None:
+        """궤적 점을 추가하고 최대 길이를 초과하면 오래된 점을 삭제한다."""
         trail = self.trails.setdefault(oid, [])
         trail.append(centroid)
         if len(trail) > self.max_trail_len:
             trail.pop(0)
 
     # ------------------------------------------------------------------
-    # Public API
+    # 공개 API
     # ------------------------------------------------------------------
 
     def update(
         self, detections: List[Tuple[int, int, int, int]]
     ) -> Dict[int, Tuple[int, int]]:
         """
-        Update tracker state with this frame's detections.
+        현재 프레임의 감지 결과로 추적기 상태를 갱신한다.
 
         Parameters
         ----------
-        detections : list of (x, y, w, h) bounding boxes
+        detections : (x, y, w, h) 바운딩 박스 목록
 
         Returns
         -------
-        dict  {object_id: (cx, cy)}  for all currently live objects
+        dict  {객체_ID: (cx, cy)}  현재 살아있는 모든 객체
         """
-        # ---- no detections this frame --------------------------------
+        # ---- 이번 프레임에 감지 없음 --------------------------------
         if len(detections) == 0:
             for oid in list(self.disappeared.keys()):
                 self.disappeared[oid] += 1
@@ -109,36 +109,36 @@ class Tracker:
                     self._deregister(oid)
             return dict(self.objects)
 
-        # ---- compute centroids of incoming detections ----------------
+        # ---- 입력 감지 결과의 중심점 계산 ---------------------------
         input_centroids: List[Tuple[int, int]] = []
         for x, y, w, h in detections:
             cx = x + w // 2
             cy = y + h // 2
             input_centroids.append((cx, cy))
 
-        # ---- first frame: register all -----------------------------
+        # ---- 첫 프레임: 모두 신규 등록 ----------------------------
         if len(self.objects) == 0:
             for c in input_centroids:
                 self._register(c)
             return dict(self.objects)
 
-        # ---- greedy nearest-neighbour matching ----------------------
+        # ---- 그리디 최근접 이웃 매칭 --------------------------------
         obj_ids = list(self.objects.keys())
         obj_centroids = list(self.objects.values())
 
-        # Build distance matrix  [num_objects × num_detections]
+        # 거리 행렬 [기존 객체 수 × 신규 감지 수]
         D = np.zeros((len(obj_centroids), len(input_centroids)), dtype=float)
         for i, oc in enumerate(obj_centroids):
             for j, ic in enumerate(input_centroids):
                 D[i, j] = np.sqrt((oc[0] - ic[0]) ** 2 + (oc[1] - ic[1]) ** 2)
 
-        # Sort by minimum distance — greedy assignment
+        # 최소 거리 기준 정렬 — 그리디 할당
         rows = D.min(axis=1).argsort()
         cols = D.argmin(axis=1)[rows]
 
         used_rows: set[int] = set()
         used_cols: set[int] = set()
-        new_matches: Dict[int, int] = {}  # det_index → obj_id
+        new_matches: Dict[int, int] = {}  # 감지 인덱스 → 객체 ID
 
         for row, col in zip(rows, cols):
             if row in used_rows or col in used_cols:
@@ -154,16 +154,15 @@ class Tracker:
             used_cols.add(col)
             new_matches[col] = oid
 
-        # ---- detect ID switches (heuristic) -------------------------
-        # An ID switch is counted when two previously separate objects now
-        # swap their detection assignment compared to the last frame.
+        # ---- ID 교환 감지 (휴리스틱) --------------------------------
+        # 이전 프레임 대비 같은 감지 인덱스에 다른 ID가 매칭되면 교환으로 집계
         for det_idx, oid in new_matches.items():
             prev_oid = self._prev_matches.get(det_idx)
             if prev_oid is not None and prev_oid != oid:
                 self.id_switches += 1
         self._prev_matches = new_matches
 
-        # ---- handle unmatched existing objects ----------------------
+        # ---- 매칭 실패한 기존 객체 처리 -----------------------------
         unmatched_rows = set(range(len(obj_ids))) - used_rows
         for row in unmatched_rows:
             oid = obj_ids[row]
@@ -172,7 +171,7 @@ class Tracker:
                 self.tracking_failures += 1
                 self._deregister(oid)
 
-        # ---- register brand-new detections --------------------------
+        # ---- 새로 등장한 감지 결과 등록 -----------------------------
         unmatched_cols = set(range(len(input_centroids))) - used_cols
         for col in unmatched_cols:
             self._register(input_centroids[col])
@@ -180,15 +179,15 @@ class Tracker:
         return dict(self.objects)
 
     # ------------------------------------------------------------------
-    # Convenience accessors
+    # 편의 메서드
     # ------------------------------------------------------------------
 
     def get_trail(self, oid: int) -> List[Tuple[int, int]]:
-        """Return the stored trail for object *oid* (may be empty list)."""
+        """객체 oid의 궤적 점 목록을 반환한다 (없으면 빈 리스트)."""
         return self.trails.get(oid, [])
 
     def stats(self) -> Dict[str, int]:
-        """Return cumulative statistics for the report."""
+        """보고서용 누적 통계를 반환한다."""
         return {
             "id_switches": self.id_switches,
             "tracking_failures": self.tracking_failures,
